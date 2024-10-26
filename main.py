@@ -25,7 +25,7 @@ class Match(BaseModel):
 
 class UserLuv(BaseModel):
     user_id: str
-    luv_id: str
+    luv_email: str
     date_time: str
 
 class Location(BaseModel):
@@ -54,17 +54,18 @@ async def login(user: User):
     cursor = db.cursor()
 
     cursor.execute(f"SELECT * FROM users WHERE email = '{user.email}'")
-    user = cursor.fetchone()
+    user_ = cursor.fetchone()
 
     cursor.close()
     db.close()
 
-    if len(user) == 0:
-        return {"status": 401, "user_id": None}
-    if not check_password_hash(user[2], user.password):
-        return {"status": 402, "user_id": None}
+    if not user_:
+        return {"status": "401", "user_id": None}
+    if not check_password_hash(user_[2], user.password):
+        return {"status": "402", "user_id": None}
     
-    return {"status": 200, "user_id": user[0]}
+    return {"status": "200", "user_id": user_[0]}
+
 
 @app.post("/register", response_model=Response)
 async def register(user: User):
@@ -74,10 +75,10 @@ async def register(user: User):
     cursor.execute(f"SELECT * FROM users WHERE email = '{user.email}'")
     user_ = cursor.fetchone()
 
-    if len(user_) != 0:
+    if user_:
         cursor.close()
         db.close()
-        return {"status": 403, "user_id": None}
+        return {"status": "403"}
     
     cursor.execute("SELECT COUNT(*) FROM users")
     user_id = cursor.fetchone()[0]
@@ -89,7 +90,7 @@ async def register(user: User):
     cursor.close()
     db.close()
     
-    return {"status": 200, "user_id": user_id}
+    return {"status": "200", "user_id": str(user_id).zfill(8)}
 
 
 @app.get("/get_matches/{user_id}", response_model=list[Match])
@@ -116,16 +117,16 @@ async def update_luv(user_luv: UserLuv):
     db = get_db()
     cursor = db.cursor()
 
-    cursor.execute(f"SELECT * FROM users WHERE email = '{user_luv.email}'")
+    cursor.execute(f"SELECT * FROM users WHERE email = '{user_luv.luv_email}'")
     luv = cursor.fetchone()
-    if len(luv) == 0:
+    if not luv:
         cursor.close()
         db.close()
-        return {"status": 403}
+        return {"status": "403"}
     
     # Update users_luvs
     cursor.execute(f"""INSERT OR REPLACE INTO users_luvs (user_id, luv_id, date_time) 
-                       VALUES(SUBSTR('0000000000' || '{user_luv.user_id}', -8, 8), SUBSTR('0000000000' || '{user_luv.luv_id}', -8, 8), '{user_luv.date_time}');""")
+                       VALUES(SUBSTR('0000000000' || '{user_luv.user_id}', -8, 8), SUBSTR('0000000000' || '{luv[0]}', -8, 8), '{user_luv.date_time}');""")
     
     # Update users_matches
     cursor.execute(f"DELETE FROM users_matches WHERE send_id = '{user_luv.user_id}'")
@@ -142,7 +143,7 @@ async def update_luv(user_luv: UserLuv):
     cursor.execute(f"""
                     SELECT user_id, latitude, longitude
                     FROM users_locations
-                    WHERE user_id = '{user_luv.luv_id}'
+                    WHERE user_id = '{luv[0]}'
                     ORDER BY date_time DESC
                     LIMIT 1;
                     """)
@@ -156,6 +157,8 @@ async def update_luv(user_luv: UserLuv):
     db.commit()
     cursor.close()
     db.close()
+
+    return {"status": "200"}
 
 
 @app.post("/update_location", response_model=Response)
@@ -254,8 +257,8 @@ async def update_location(location: Location):
         if distance < DISTANCE:
             cursor.execute(f"INSERT OR REPLACE INTO users_matches (send_id, receive_id, distance, date_time) VALUES('{location.user_id}', '{receive_id}', '{distance}', '{location.date_time}')")
 
-        db.commit()
-        cursor.close()
-        db.close()
-        
-    return {"status": 200}
+    db.commit()
+    cursor.close()
+    db.close()
+
+    return {"status": "200"}
