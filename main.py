@@ -9,6 +9,8 @@ from geopy.distance import geodesic
 
 
 app = FastAPI()
+
+
 DISTANCE = 20
 
 
@@ -40,12 +42,14 @@ class Response(BaseModel):
 
 
 def get_db():
-    return mysql.connector.connect(
+    db = mysql.connector.connect(
         host="luvlydatabase.c5wy4cuwaohj.us-west-1.rds.amazonaws.com",
         user="admin",
         password="hyungjae1130",
         database="luvly"
     )
+    db.start_transaction(isolation_level="READ COMMITTED")
+    return db
 
 
 @app.get("/")
@@ -58,7 +62,7 @@ async def login(user: User):
     db = get_db()
     cursor = db.cursor()
 
-    cursor.execute(f"SELECT * FROM users WHERE email = '{user.email}'")
+    cursor.execute(f"SELECT user_id, password_hash FROM users WHERE email = '{user.email}'")
     user_ = cursor.fetchone()
 
     cursor.close()
@@ -66,7 +70,7 @@ async def login(user: User):
 
     if not user_:
         return {"status": "401", "user_id": None}
-    if not check_password_hash(user_[2], user.password):
+    if not check_password_hash(user_[1], user.password):
         return {"status": "402", "user_id": None}
     
     return {"status": "200", "user_id": user_[0]}
@@ -77,7 +81,7 @@ async def register(user: User):
     db = get_db()
     cursor = db.cursor()
 
-    cursor.execute(f"SELECT * FROM users WHERE email = '{user.email}'")
+    cursor.execute(f"SELECT user_id FROM users WHERE email = '{user.email}'")
     user_ = cursor.fetchone()
 
     if user_:
@@ -85,7 +89,7 @@ async def register(user: User):
         db.close()
         return {"status": "403"}
     
-    cursor.execute("SELECT COUNT(*) FROM users")
+    cursor.execute("SELECT COUNT(user_id) FROM users")
     user_id = cursor.fetchone()[0]
     if not user_id:
         user_id = 0
@@ -124,7 +128,7 @@ async def update_luv(user_luv: UserLuv):
     db = get_db()
     cursor = db.cursor()
 
-    cursor.execute(f"SELECT * FROM users WHERE email = '{user_luv.luv_email}'")
+    cursor.execute(f"SELECT user_id FROM users WHERE email = '{user_luv.luv_email}'")
     luv = cursor.fetchone()
     if not luv:
         cursor.close()
@@ -132,7 +136,10 @@ async def update_luv(user_luv: UserLuv):
         return {"status": "403"}
     
     # Update users_luvs
-    cursor.execute(f"""INSERT IGNORE INTO users_luvs (user_id, luv_id, date_time) 
+    print(f"""INSERT INTO users_luvs (user_id, luv_id, date_time) 
+                       VALUES('{user_luv.user_id}', '{luv[0]}', '{user_luv.date_time}');""")
+    
+    cursor.execute(f"""INSERT INTO users_luvs (user_id, luv_id, date_time) 
                        VALUES('{user_luv.user_id}', '{luv[0]}', '{user_luv.date_time}');""")
     
     # Update users_matches
@@ -154,12 +161,17 @@ async def update_luv(user_luv: UserLuv):
                     ORDER BY date_time DESC
                     LIMIT 1;
                     """)
-    receive_id, receive_latitude, receive_longitude = cursor.fetchone()
+    receive_user = cursor.fetchone()
+    if receive_user:
+        receive_id, receive_latitude, receive_longitude = receive_user
 
-    distance = geodesic((send_latitude, send_longitude), (receive_latitude, receive_longitude)).meters
+        distance = geodesic((send_latitude, send_longitude), (receive_latitude, receive_longitude)).meters
 
-    if distance < DISTANCE:
-        cursor.execute(f"INSERT IGNORE INTO users_matches (send_id, receive_id, distance, date_time) VALUES('{send_id}', '{receive_id}', {distance}, '{user_luv.date_time}')")
+        if distance < DISTANCE:
+            cursor.execute(f"""INSERT INTO users_matches (send_id, receive_id, distance, date_time) 
+                           VALUES('{send_id}', '{receive_id}', {distance}, '{user_luv.date_time}') 
+                           ON DUPLICATE KEY UPDATE date_time = '{user_luv.date_time}'
+                           """)
 
     db.commit()
     cursor.close()
@@ -173,7 +185,7 @@ async def update_location(location: Location):
     db = get_db()
     cursor = db.cursor()
 
-    cursor.execute(f"SELECT COUNT(*) FROM users_locations WHERE user_id = '{location.user_id}'")
+    cursor.execute(f"SELECT COUNT(user_id) FROM users_locations WHERE user_id = '{location.user_id}'")
     count = cursor.fetchone()[0]
 
     # Deleting oldest location
@@ -187,8 +199,9 @@ async def update_location(location: Location):
         
     # Update Location
     cursor.execute(f"""
-                    INSERT IGNORE INTO users_locations (user_id, latitude, longitude, date_time) 
+                    INSERT INTO users_locations (user_id, latitude, longitude, date_time) 
                     VALUES ('{location.user_id}', {location.latitude}, {location.longitude}, '{location.date_time}')
+                    ON DUPLICATE KEY UPDATE latitude = {location.latitude}, longitude = {location.longitude}
                     """)
     
     # Getting most recent location of all users 
@@ -226,8 +239,9 @@ async def update_location(location: Location):
             match = cursor.fetchone()
             if match and match[2] == location.user_id:
                 cursor.execute(f"""
-                                INSERT IGNORE INTO users_matches (send_id, receive_id, distance, date_time)
+                                INSERT INTO users_matches (send_id, receive_id, distance, date_time)
                                 VALUES ('{send_id}', '{location.user_id}', {distance}, '{location.date_time}')
+                                ON DUPLICATE KEY UPDATE date_time = '{location.date_time}'
                                 """)
                 
     # Delete matches where current user is sender
@@ -251,12 +265,17 @@ async def update_location(location: Location):
                         ORDER BY date_time DESC
                         LIMIT 1;
                         """)
-        receive_id, receive_latitude, receive_longitude = cursor.fetchone()
+        receive_user = cursor.fetchone()
+        if receive_user:
+            receive_id, receive_latitude, receive_longitude = receive_user
 
-        distance = geodesic((location.latitude, location.longitude), (receive_latitude, receive_longitude)).meters
+            distance = geodesic((location.latitude, location.longitude), (receive_latitude, receive_longitude)).meters
 
-        if distance < DISTANCE:
-            cursor.execute(f"INSERT IGNORE INTO users_matches (send_id, receive_id, distance, date_time) VALUES('{location.user_id}', '{receive_id}', {distance}, '{location.date_time}')")
+            if distance < DISTANCE:
+                cursor.execute(f"""INSERT INTO users_matches (send_id, receive_id, distance, date_time) 
+                            VALUES('{location.user_id}', '{receive_id}', {distance}, '{location.date_time}')
+                            ON DUPLICATE KEY UPDATE date_time = '{location.date_time}'
+                            """)
 
     db.commit()
     cursor.close()
