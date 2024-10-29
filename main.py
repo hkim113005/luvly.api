@@ -1,7 +1,9 @@
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 
 import mysql.connector
+import resend
+import os
 
 from werkzeug.security import check_password_hash, generate_password_hash
 
@@ -12,6 +14,9 @@ app = FastAPI()
 
 
 DISTANCE = 20
+
+# Initialize Resend
+resend.api_key = "re_PTpC8h2Q_KAyxKq4DhdBJm7hRDh8rDgAM"
 
 
 class User(BaseModel):
@@ -40,6 +45,10 @@ class Response(BaseModel):
     status: str
     user_id: str | None = None
 
+class VerifyEmail(BaseModel):
+    email: str
+    verification_code: str
+
 
 def get_db():
     db = mysql.connector.connect(
@@ -50,6 +59,30 @@ def get_db():
     )
     db.start_transaction(isolation_level="READ COMMITTED")
     return db
+
+
+def send_verification_email(email: str, verification_code: str):
+    try:
+        email_body = f"""
+        <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px; background-color: #ffffff; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1);">
+            <h2 style="color: #333333; text-align: center; margin-bottom: 20px;">Email Verification</h2>
+            <p style="color: #666666; font-size: 16px; line-height: 1.5; margin-bottom: 20px;">Thank you for registering! To complete your account verification, please enter this code in the app:</p>
+            <div style="background-color: #f5f5f5; padding: 15px; border-radius: 4px; text-align: center; margin-bottom: 20px;">
+                <span style="font-size: 24px; font-weight: bold; color: #333333; letter-spacing: 2px;">{verification_code}</span>
+            </div>
+            <p style="color: #666666; font-size: 14px; text-align: center;">If you didn't request this verification, please ignore this email.</p>
+        </div>
+        """
+        resend.Emails.send({
+            "from": "verification@luvly-app.org",
+            "to": email,
+            "subject": "Please verify your Luvly account",
+            "html": email_body
+        })
+        return True
+    except Exception as e:
+        print(f"Failed to send verification email: {e}")
+        return False
 
 
 @app.get("/")
@@ -72,6 +105,11 @@ async def login(user: User):
         return {"status": "401", "user_id": None}
     if not check_password_hash(user_[1], user.password):
         return {"status": "402", "user_id": None}
+    #check if user is verified
+    cursor.execute(f"SELECT is_verified FROM verified WHERE email = '{user.email}'")
+    is_verified = cursor.fetchone()[4]
+    if not is_verified:
+        return {"status": "405", "user_id": None}  # Email not verified
     
     return {"status": "200", "user_id": user_[0]}
 
@@ -94,14 +132,59 @@ async def register(user: User):
     if not user_id:
         user_id = 0
 
+    # Generate verification code
+    verification_code = ''.join([str(random.randint(0, 9)) for _ in range(6)])
+    
+    # Store user
     cursor.execute(f"""INSERT INTO users (user_id, email, password_hash) 
                        VALUES(LPAD('{user_id}', 8, '0'), '{user.email}', '{generate_password_hash(user.password)}');""")
+    
+    #store user in verification database
+    cursor.execute(f"""INSERT INTO verification (user_id, email, verification_code, is_verified) 
+                      VALUES (LPAD('{user_id}', 8, '0'), '{user.email}', '{verification_code}', FALSE)""")
     
     db.commit()
     cursor.close()
     db.close()
+
+    # Send verification email
+    if send_verification_email(user.email, verification_code):
+        return {"status": "200", "user_id": str(user_id).zfill(8)}
+    else:
+        return {"status": "406"}  # Failed to send verification email
+
+
+@app.post("/verify-email", response_model=Response)
+async def verify_email(verify: VerifyEmail):
+    db = get_db()
+    cursor = db.cursor()
+
+    cursor.execute(f"SELECT * FROM verification WHERE email = '{verify.email}'")
+    user = cursor.fetchone()
+
+    if not user:
+        cursor.close()
+        db.close()
+        return {"status": "401"}  # User not found
+
+    if user[4]:  # Already verified
+        cursor.close()
+        db.close()
+        return {"status": "407"}
+
+    if user[3] != verify.verification_code:  # Check verification code
+        cursor.close()
+        db.close()
+        return {"status": "408"}  # Invalid verification code
+
+    # Update user as verified
+    cursor.execute(f"UPDATE verification SET is_verified = TRUE WHERE email = '{verify.email}'")
     
-    return {"status": "200", "user_id": str(user_id).zfill(8)}
+    db.commit()
+    cursor.close()
+    db.close()
+
+    return {"status": "200", "user_id": user[1]}
 
 
 @app.get("/get_matches/{user_id}", response_model=list[Match])
