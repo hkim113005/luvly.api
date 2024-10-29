@@ -102,8 +102,8 @@ async def login(user: User):
     if not check_password_hash(user_[2], user.password):
         return {"status": "402", "user_id": None}
     #check if user is verified
-    cursor.execute(f"SELECT is_verified FROM users WHERE email = '{user.email}'")
-    is_verified = cursor.fetchone()[0]
+    cursor.execute(f"SELECT is_verified FROM verified WHERE email = '{user.email}'")
+    is_verified = cursor.fetchone()[4]
     if not is_verified:
         return {"status": "405", "user_id": None}  # Email not verified
     
