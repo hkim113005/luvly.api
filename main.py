@@ -1,7 +1,7 @@
 from fastapi import FastAPI
 from pydantic import BaseModel
 
-import sqlite3
+import mysql.connector
 
 from werkzeug.security import check_password_hash, generate_password_hash
 
@@ -40,7 +40,12 @@ class Response(BaseModel):
 
 
 def get_db():
-    return sqlite3.connect("data.db")
+    return mysql.connector.connect(
+        host="luvlydatabase.c5wy4cuwaohj.us-west-1.rds.amazonaws.com",
+        user="admin",
+        password="hyungjae1130",
+        database="luvly"
+    )
 
 
 @app.get("/")
@@ -82,9 +87,11 @@ async def register(user: User):
     
     cursor.execute("SELECT COUNT(*) FROM users")
     user_id = cursor.fetchone()[0]
+    if not user_id:
+        user_id = 0
 
     cursor.execute(f"""INSERT INTO users (user_id, email, password_hash) 
-                       VALUES(SUBSTR('0000000000' || '{user_id}', -8, 8), '{user.email}', '{generate_password_hash(user.password)}');""")
+                       VALUES(LPAD('{user_id}', 8, '0'), '{user.email}', '{generate_password_hash(user.password)}');""")
     
     db.commit()
     cursor.close()
@@ -125,8 +132,8 @@ async def update_luv(user_luv: UserLuv):
         return {"status": "403"}
     
     # Update users_luvs
-    cursor.execute(f"""INSERT OR REPLACE INTO users_luvs (user_id, luv_id, date_time) 
-                       VALUES(SUBSTR('0000000000' || '{user_luv.user_id}', -8, 8), SUBSTR('0000000000' || '{luv[0]}', -8, 8), '{user_luv.date_time}');""")
+    cursor.execute(f"""INSERT IGNORE INTO users_luvs (user_id, luv_id, date_time) 
+                       VALUES('{user_luv.user_id}', '{luv[0]}', '{user_luv.date_time}');""")
     
     # Update users_matches
     cursor.execute(f"DELETE FROM users_matches WHERE send_id = '{user_luv.user_id}'")
@@ -152,7 +159,7 @@ async def update_luv(user_luv: UserLuv):
     distance = geodesic((send_latitude, send_longitude), (receive_latitude, receive_longitude)).meters
 
     if distance < DISTANCE:
-        cursor.execute(f"INSERT OR REPLACE INTO users_matches (send_id, receive_id, distance, date_time) VALUES('{send_id}', '{receive_id}', '{distance}', '{user_luv.date_time}')")
+        cursor.execute(f"INSERT IGNORE INTO users_matches (send_id, receive_id, distance, date_time) VALUES('{send_id}', '{receive_id}', {distance}, '{user_luv.date_time}')")
 
     db.commit()
     cursor.close()
@@ -174,18 +181,14 @@ async def update_location(location: Location):
         cursor.execute(f"""
                        DELETE FROM users_locations
                        WHERE user_id = '{location.user_id}'
-                       AND date_time = (
-                       SELECT date_time
-                       FROM users_locations
-                       WHERE user_id = '{location.user_id}'
                        ORDER BY date_time ASC
-                       LIMIT 1
-                       )
+                       LIMIT 1;
                        """)
+        
     # Update Location
     cursor.execute(f"""
-                    INSERT OR REPLACE INTO users_locations (user_id, latitude, longitude, date_time) 
-                    VALUES ('{location.user_id}', '{location.latitude}', '{location.longitude}', '{location.date_time}')
+                    INSERT IGNORE INTO users_locations (user_id, latitude, longitude, date_time) 
+                    VALUES ('{location.user_id}', {location.latitude}, {location.longitude}, '{location.date_time}')
                     """)
     
     # Getting most recent location of all users 
@@ -204,7 +207,6 @@ async def update_location(location: Location):
     cursor.execute(f"DELETE FROM users_matches WHERE receive_id = '{location.user_id}'")
 
     for send_user in all_users:
-        # print(send_user)
         send_id, send_latitude, send_longitude = send_user
         if send_id == location.user_id:
             continue  # Skip calculating distance to self
@@ -224,14 +226,13 @@ async def update_location(location: Location):
             match = cursor.fetchone()
             if match and match[2] == location.user_id:
                 cursor.execute(f"""
-                                INSERT OR REPLACE INTO users_matches (send_id, receive_id, distance, date_time)
-                                VALUES ('{send_id}', '{location.user_id}', '{distance}', '{location.date_time}')
+                                INSERT IGNORE INTO users_matches (send_id, receive_id, distance, date_time)
+                                VALUES ('{send_id}', '{location.user_id}', {distance}, '{location.date_time}')
                                 """)
                 
     # Delete matches where current user is sender
     cursor.execute(f"DELETE FROM users_matches WHERE send_id = '{location.user_id}'")
 
-    cursor.execute(f"SELECT * FROM users_luvs WHERE `user_id` = '{location.user_id}'")
     cursor.execute(f"""
                     SELECT *
                     FROM users_luvs
@@ -255,7 +256,7 @@ async def update_location(location: Location):
         distance = geodesic((location.latitude, location.longitude), (receive_latitude, receive_longitude)).meters
 
         if distance < DISTANCE:
-            cursor.execute(f"INSERT OR REPLACE INTO users_matches (send_id, receive_id, distance, date_time) VALUES('{location.user_id}', '{receive_id}', '{distance}', '{location.date_time}')")
+            cursor.execute(f"INSERT IGNORE INTO users_matches (send_id, receive_id, distance, date_time) VALUES('{location.user_id}', '{receive_id}', {distance}, '{location.date_time}')")
 
     db.commit()
     cursor.close()
