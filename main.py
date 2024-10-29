@@ -4,6 +4,7 @@ from pydantic import BaseModel
 import mysql.connector
 import resend
 import os
+import random
 
 from werkzeug.security import check_password_hash, generate_password_hash
 
@@ -45,8 +46,10 @@ class Response(BaseModel):
     status: str
     user_id: str | None = None
 
-class VerifyEmail(BaseModel):
+class VerifyUser(BaseModel):
+    user_id: str | None = None
     email: str
+    password: str
     verification_code: str
 
 
@@ -154,12 +157,12 @@ async def register(user: User):
         return {"status": "406"}  # Failed to send verification email
 
 
-@app.post("/verify-email", response_model=Response)
-async def verify_email(verify: VerifyEmail):
+@app.post("/verify_email", response_model=Response)
+async def verify_email(verifyUser: VerifyUser):
     db = get_db()
     cursor = db.cursor()
 
-    cursor.execute(f"SELECT * FROM verification WHERE email = '{verify.email}'")
+    cursor.execute(f"SELECT * FROM verification WHERE email = '{verifyUser.email}'")
     user = cursor.fetchone()
 
     if not user:
@@ -172,13 +175,13 @@ async def verify_email(verify: VerifyEmail):
         db.close()
         return {"status": "407"}
 
-    if user[3] != verify.verification_code:  # Check verification code
+    if user[3] != verifyUser.verification_code:  # Check verification code
         cursor.close()
         db.close()
         return {"status": "408"}  # Invalid verification code
 
     # Update user as verified
-    cursor.execute(f"UPDATE verification SET is_verified = TRUE WHERE email = '{verify.email}'")
+    cursor.execute(f"UPDATE verification SET is_verified = TRUE WHERE email = '{verifyUser.email}'")
     
     db.commit()
     cursor.close()
