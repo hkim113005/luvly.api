@@ -138,9 +138,6 @@ async def register(user: User):
     # Generate verification code
     verification_code = ''.join([str(random.randint(0, 9)) for _ in range(6)])
     
-    # Store user
-    cursor.execute(f"""INSERT INTO users (user_id, email, password_hash) 
-                       VALUES(LPAD('{user_id}', 8, '0'), '{user.email}', '{generate_password_hash(user.password)}');""")
     
     #store user in verification database
     cursor.execute(f"""INSERT INTO verification (user_id, email, verification_code, is_verified) 
@@ -182,6 +179,9 @@ async def verify_email(verifyUser: VerifyUser):
 
     # Update user as verified
     cursor.execute(f"UPDATE verification SET is_verified = TRUE WHERE email = '{verifyUser.email}'")
+    # Store user
+    cursor.execute(f"""INSERT INTO users (user_id, email, password_hash) 
+                       VALUES(LPAD('{verifyUser.user_id}', 8, '0'), '{verifyUser.email}', '{generate_password_hash(verifyUser.password)}');""")
     
     db.commit()
     cursor.close()
