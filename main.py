@@ -21,7 +21,7 @@ resend.api_key = "re_PTpC8h2Q_KAyxKq4DhdBJm7hRDh8rDgAM"
 
 
 class User(BaseModel):
-    user_id: str | None = None
+    user_id: str = None
     email: str
     password: str
 
@@ -44,10 +44,10 @@ class Location(BaseModel):
 
 class Response(BaseModel):
     status: str
-    user_id: str | None = None
+    user_id: str = None
 
 class VerifyUser(BaseModel):
-    user_id: str | None = None
+    user_id: str = None
     email: str
     password: str
     verification_code: str
@@ -62,6 +62,7 @@ def get_db():
     )
     db.start_transaction(isolation_level="READ COMMITTED")
     return db
+
 
 
 def send_verification_email(email: str, verification_code: str):
@@ -101,16 +102,17 @@ async def login(user: User):
     cursor.execute(f"SELECT user_id, password_hash FROM users WHERE email = '{user.email}'")
     user_ = cursor.fetchone()
 
-    cursor.close()
-    db.close()
 
     if not user_:
         return {"status": "401", "user_id": None}
     if not check_password_hash(user_[1], user.password):
         return {"status": "402", "user_id": None}
     #check if user is verified
-    cursor.execute(f"SELECT is_verified FROM verified WHERE email = '{user.email}'")
-    is_verified = cursor.fetchone()[4]
+    cursor.execute(f"SELECT * FROM verification WHERE email = '{user.email}'")
+    is_verified = cursor.fetchone()[3]
+    
+    cursor.close()
+    db.close()
     if not is_verified:
         return {"status": "405", "user_id": None}  # Email not verified
     
@@ -140,8 +142,8 @@ async def register(user: User):
     
     
     #store user in verification database
-    cursor.execute(f"""INSERT INTO verification (user_id, email, verification_code, is_verified) 
-                      VALUES (LPAD('{user_id}', 8, '0'), '{user.email}', '{verification_code}', FALSE)""")
+    cursor.execute(f"""INSERT INTO verification (email, verification_code, is_verified) 
+                      VALUES ('{user.email}', '{verification_code}', FALSE)""")
     
     db.commit()
     cursor.close()
@@ -167,17 +169,17 @@ async def verify_email(verifyUser: VerifyUser):
         db.close()
         return {"status": "401"}  # User not found
 
-    if user[4]:  # Already verified
+    if user[3]:  # Already verified
         cursor.close()
         db.close()
         return {"status": "407"}
 
-    if user[3] != verifyUser.verification_code:  # Check verification code
+    if user[2] != verifyUser.verification_code:  # Check verification code
         cursor.close()
         db.close()
         return {"status": "408"}  # Invalid verification code
 
-    # Update user as verified
+    # Update user as verified and update user_id
     cursor.execute(f"UPDATE verification SET is_verified = TRUE WHERE email = '{verifyUser.email}'")
     # Store user
     cursor.execute(f"""INSERT INTO users (user_id, email, password_hash) 
