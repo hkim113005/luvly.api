@@ -4,6 +4,9 @@ from pydantic import BaseModel
 import mysql.connector
 import resend
 import os
+import random
+from datetime import datetime
+import time
 
 from werkzeug.security import check_password_hash, generate_password_hash
 
@@ -14,13 +17,14 @@ app = FastAPI()
 
 
 DISTANCE = 20
+TIME_BUFFER = 300
 
 # Initialize Resend
-resend.api_key = "re_PTpC8h2Q_KAyxKq4DhdBJm7hRDh8rDgAM"
+resend.api_key = "re_HscFn33y_89LC49ZHxNpMjDRRqvgeynmY"
 
 
 class User(BaseModel):
-    user_id: str | None = None
+    user_id: str = None
     email: str
     password: str
 
@@ -43,10 +47,12 @@ class Location(BaseModel):
 
 class Response(BaseModel):
     status: str
-    user_id: str | None = None
+    user_id: str = None
 
-class VerifyEmail(BaseModel):
+class VerifyUser(BaseModel):
+    user_id: str = None
     email: str
+    password: str
     verification_code: str
 
 
@@ -98,16 +104,21 @@ async def login(user: User):
     cursor.execute(f"SELECT user_id, password_hash FROM users WHERE email = '{user.email}'")
     user_ = cursor.fetchone()
 
-    cursor.close()
-    db.close()
-
     if not user_:
+        cursor.close()
+        db.close()
         return {"status": "401", "user_id": None}
     if not check_password_hash(user_[1], user.password):
+        cursor.close()
+        db.close()
         return {"status": "402", "user_id": None}
+    
     #check if user is verified
-    cursor.execute(f"SELECT is_verified FROM verified WHERE email = '{user.email}'")
-    is_verified = cursor.fetchone()[4]
+    cursor.execute(f"SELECT * FROM verification WHERE email = '{user.email}'")
+    is_verified = cursor.fetchone()[3]
+    
+    cursor.close()
+    db.close()
     if not is_verified:
         return {"status": "405", "user_id": None}  # Email not verified
     
@@ -135,13 +146,10 @@ async def register(user: User):
     # Generate verification code
     verification_code = ''.join([str(random.randint(0, 9)) for _ in range(6)])
     
-    # Store user
-    cursor.execute(f"""INSERT INTO users (user_id, email, password_hash) 
-                       VALUES(LPAD('{user_id}', 8, '0'), '{user.email}', '{generate_password_hash(user.password)}');""")
     
     #store user in verification database
-    cursor.execute(f"""INSERT INTO verification (user_id, email, verification_code, is_verified) 
-                      VALUES (LPAD('{user_id}', 8, '0'), '{user.email}', '{verification_code}', FALSE)""")
+    cursor.execute(f"""INSERT INTO verification (email, verification_code, is_verified) 
+                      VALUES ('{user.email}', '{verification_code}', FALSE)""")
     
     db.commit()
     cursor.close()
@@ -154,12 +162,12 @@ async def register(user: User):
         return {"status": "406"}  # Failed to send verification email
 
 
-@app.post("/verify-email", response_model=Response)
-async def verify_email(verify: VerifyEmail):
+@app.post("/verify_email", response_model=Response)
+async def verify_email(verifyUser: VerifyUser):
     db = get_db()
     cursor = db.cursor()
 
-    cursor.execute(f"SELECT * FROM verification WHERE email = '{verify.email}'")
+    cursor.execute(f"SELECT * FROM verification WHERE email = '{verifyUser.email}'")
     user = cursor.fetchone()
 
     if not user:
@@ -167,18 +175,21 @@ async def verify_email(verify: VerifyEmail):
         db.close()
         return {"status": "401"}  # User not found
 
-    if user[4]:  # Already verified
+    if user[3]:  # Already verified
         cursor.close()
         db.close()
         return {"status": "407"}
 
-    if user[3] != verify.verification_code:  # Check verification code
+    if user[2] != verifyUser.verification_code:  # Check verification code
         cursor.close()
         db.close()
         return {"status": "408"}  # Invalid verification code
 
-    # Update user as verified
-    cursor.execute(f"UPDATE verification SET is_verified = TRUE WHERE email = '{verify.email}'")
+    # Update user as verified and update user_id
+    cursor.execute(f"UPDATE verification SET is_verified = TRUE WHERE email = '{verifyUser.email}'")
+    # Store user
+    cursor.execute(f"""INSERT INTO users (user_id, email, password_hash) 
+                       VALUES(LPAD('{verifyUser.user_id}', 8, '0'), '{verifyUser.email}', '{generate_password_hash(verifyUser.password)}');""")
     
     db.commit()
     cursor.close()
@@ -199,11 +210,77 @@ async def get_matches(user_id: str):
                    """)
     
     matches = cursor.fetchall()
+    """
+    for match in cursor.fetchall():
+        if time_difference(match[3], time.strftime("%Y-%m-%d %H:%M:%S")) < TIME_BUFFER:
+            matches.append(match)
+    """
 
     cursor.close()
     db.close()
     
     return [{"send_id": match[0], "receive_id": match[1], "distance": match[2], "date_time": match[3]} for match in matches]
+
+
+def send_notification(receive_id):
+    print("HELLO")
+
+
+def time_difference(datetime_str1, datetime_str2):
+    # Define the format of the datetime strings
+    datetime_format = "%Y-%m-%d %H:%M:%S"
+    
+    # Convert strings to datetime objects
+    datetime1 = datetime.strptime(datetime_str1, datetime_format)
+    datetime2 = datetime.strptime(datetime_str2, datetime_format)
+    
+    # Calculate the difference and return total seconds
+    time_difference = datetime2 - datetime1
+    return time_difference.total_seconds()
+
+
+def update_match(cursor, send_id, receive_id, date_time):
+    # Update users_matches
+    cursor.execute(f"""
+                    SELECT user_id, latitude, longitude
+                    FROM users_locations
+                    WHERE user_id = '{send_id}'
+                    ORDER BY date_time DESC
+                    LIMIT 1;
+                    """)
+    send_id, send_latitude, send_longitude = cursor.fetchone()
+
+    cursor.execute(f"""
+                    SELECT user_id, latitude, longitude
+                    FROM users_locations
+                    WHERE user_id = '{receive_id}'
+                    ORDER BY date_time DESC
+                    LIMIT 1;
+                    """)
+    receive_user = cursor.fetchone()
+    if receive_user:
+        receive_id, receive_latitude, receive_longitude = receive_user
+
+        distance = geodesic((send_latitude, send_longitude), (receive_latitude, receive_longitude)).meters
+
+        if distance < DISTANCE:
+            cursor.execute(f"""
+                           SELECT date_time from users_matches 
+                           WHERE send_id = '{send_id}' AND receive_id = '{receive_id}'
+                           """)
+            last_match = cursor.fetchone()
+            if not last_match:
+                print("NOTIFY")
+                # send_notification(receive_id=receive_id)
+            elif time_difference(date_time, last_match[0]) > TIME_BUFFER:
+                print("NOTIFY")
+                # send_notification(receive_id=receive_id)
+
+            cursor.execute(f"""
+                           INSERT INTO users_matches (send_id, receive_id, distance, date_time) 
+                           VALUES('{send_id}', '{receive_id}', {distance}, '{date_time}') 
+                           ON DUPLICATE KEY UPDATE distance = {distance}, date_time = '{date_time}'
+                           """)
 
 
 @app.post("/update_luv", response_model=Response)
@@ -219,42 +296,10 @@ async def update_luv(user_luv: UserLuv):
         return {"status": "403"}
     
     # Update users_luvs
-    print(f"""INSERT INTO users_luvs (user_id, luv_id, date_time) 
-                       VALUES('{user_luv.user_id}', '{luv[0]}', '{user_luv.date_time}');""")
-    
     cursor.execute(f"""INSERT INTO users_luvs (user_id, luv_id, date_time) 
                        VALUES('{user_luv.user_id}', '{luv[0]}', '{user_luv.date_time}');""")
     
-    # Update users_matches
-    cursor.execute(f"DELETE FROM users_matches WHERE send_id = '{user_luv.user_id}'")
-
-    cursor.execute(f"""
-                    SELECT user_id, latitude, longitude
-                    FROM users_locations
-                    WHERE user_id = '{user_luv.user_id}'
-                    ORDER BY date_time DESC
-                    LIMIT 1;
-                    """)
-    send_id, send_latitude, send_longitude = cursor.fetchone()
-
-    cursor.execute(f"""
-                    SELECT user_id, latitude, longitude
-                    FROM users_locations
-                    WHERE user_id = '{luv[0]}'
-                    ORDER BY date_time DESC
-                    LIMIT 1;
-                    """)
-    receive_user = cursor.fetchone()
-    if receive_user:
-        receive_id, receive_latitude, receive_longitude = receive_user
-
-        distance = geodesic((send_latitude, send_longitude), (receive_latitude, receive_longitude)).meters
-
-        if distance < DISTANCE:
-            cursor.execute(f"""INSERT INTO users_matches (send_id, receive_id, distance, date_time) 
-                           VALUES('{send_id}', '{receive_id}', {distance}, '{user_luv.date_time}') 
-                           ON DUPLICATE KEY UPDATE date_time = '{user_luv.date_time}'
-                           """)
+    update_match(cursor=cursor, send_id=user_luv.user_id, receive_id=luv[0], date_time=user_luv.date_time)
 
     db.commit()
     cursor.close()
@@ -286,46 +331,6 @@ async def update_location(location: Location):
                     VALUES ('{location.user_id}', {location.latitude}, {location.longitude}, '{location.date_time}')
                     ON DUPLICATE KEY UPDATE latitude = {location.latitude}, longitude = {location.longitude}
                     """)
-    
-    # Getting most recent location of all users 
-    cursor.execute("""
-                   SELECT user_id, latitude, longitude
-                   FROM users_locations AS ul
-                   WHERE date_time = (
-                   SELECT MAX(date_time)
-                   FROM users_locations
-                   WHERE user_id = ul.user_id
-                   )
-                   """)
-    all_users = cursor.fetchall()
-
-    # Delete existing matches for the current user 
-    cursor.execute(f"DELETE FROM users_matches WHERE receive_id = '{location.user_id}'")
-
-    for send_user in all_users:
-        send_id, send_latitude, send_longitude = send_user
-        if send_id == location.user_id:
-            continue  # Skip calculating distance to self
-        
-        distance = geodesic((location.latitude, location.longitude), (send_latitude, send_longitude)).meters
-        
-        # Store the calculated distance in the users_matches table if less than 20 meters and the other user loves this user
-        if distance < DISTANCE:
-            cursor.execute(f"""
-                            SELECT *
-                            FROM users_luvs
-                            WHERE user_id = '{send_id}'
-                            ORDER BY date_time DESC
-                            LIMIT 1;
-                            """)
-            
-            match = cursor.fetchone()
-            if match and match[2] == location.user_id:
-                cursor.execute(f"""
-                                INSERT INTO users_matches (send_id, receive_id, distance, date_time)
-                                VALUES ('{send_id}', '{location.user_id}', {distance}, '{location.date_time}')
-                                ON DUPLICATE KEY UPDATE date_time = '{location.date_time}'
-                                """)
                 
     # Delete matches where current user is sender
     cursor.execute(f"DELETE FROM users_matches WHERE send_id = '{location.user_id}'")
@@ -339,26 +344,9 @@ async def update_location(location: Location):
                     """)
     match = cursor.fetchone()
     if match and match[2] != location.user_id:
-        receive_id = match[2]
+        update_match(cursor=cursor, send_id=location.user_id, receive_id=match[2], date_time=location.date_time)
 
-        cursor.execute(f"""
-                        SELECT user_id, latitude, longitude
-                        FROM users_locations
-                        WHERE user_id = '{receive_id}'
-                        ORDER BY date_time DESC
-                        LIMIT 1;
-                        """)
-        receive_user = cursor.fetchone()
-        if receive_user:
-            receive_id, receive_latitude, receive_longitude = receive_user
-
-            distance = geodesic((location.latitude, location.longitude), (receive_latitude, receive_longitude)).meters
-
-            if distance < DISTANCE:
-                cursor.execute(f"""INSERT INTO users_matches (send_id, receive_id, distance, date_time) 
-                            VALUES('{location.user_id}', '{receive_id}', {distance}, '{location.date_time}')
-                            ON DUPLICATE KEY UPDATE date_time = '{location.date_time}'
-                            """)
+        # Temp 2
 
     db.commit()
     cursor.close()

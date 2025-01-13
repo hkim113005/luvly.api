@@ -1,0 +1,63 @@
+    """
+    # Getting most recent location of all users 
+    cursor.execute("""
+                   SELECT user_id, latitude, longitude
+                   FROM users_locations AS ul
+                   WHERE date_time = (
+                   SELECT MAX(date_time)
+                   FROM users_locations
+                   WHERE user_id = ul.user_id
+                   )
+                   """)
+    all_users = cursor.fetchall()
+
+    # Delete existing matches for the current user 
+    cursor.execute(f"DELETE FROM users_matches WHERE receive_id = '{location.user_id}'")
+
+    for send_user in all_users:
+        send_id, send_latitude, send_longitude = send_user
+        if send_id == location.user_id:
+            continue  # Skip calculating distance to self
+        
+        distance = geodesic((location.latitude, location.longitude), (send_latitude, send_longitude)).meters
+        
+        # Store the calculated distance in the users_matches table if less than 20 meters and the other user loves this user
+        if distance < DISTANCE:
+            cursor.execute(f"""
+                            SELECT *
+                            FROM users_luvs
+                            WHERE user_id = '{send_id}'
+                            ORDER BY date_time DESC
+                            LIMIT 1;
+                            """)
+            
+            match = cursor.fetchone()
+            if match and match[2] == location.user_id:
+                cursor.execute(f"""
+                                INSERT INTO users_matches (send_id, receive_id, distance, date_time)
+                                VALUES ('{send_id}', '{location.user_id}', {distance}, '{location.date_time}')
+                                ON DUPLICATE KEY UPDATE date_time = '{location.date_time}'
+                                """)
+    """
+
+2
+receive_id = match[2]
+
+        cursor.execute(f"""
+                        SELECT user_id, latitude, longitude
+                        FROM users_locations
+                        WHERE user_id = '{receive_id}'
+                        ORDER BY date_time DESC
+                        LIMIT 1;
+                        """)
+        receive_user = cursor.fetchone()
+        if receive_user:
+            receive_id, receive_latitude, receive_longitude = receive_user
+
+            distance = geodesic((location.latitude, location.longitude), (receive_latitude, receive_longitude)).meters
+
+            if distance < DISTANCE:
+                cursor.execute(f"""INSERT INTO users_matches (send_id, receive_id, distance, date_time) 
+                            VALUES('{location.user_id}', '{receive_id}', {distance}, '{location.date_time}')
+                            ON DUPLICATE KEY UPDATE date_time = '{location.date_time}'
+                            """)
