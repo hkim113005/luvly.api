@@ -17,7 +17,7 @@ app = FastAPI()
 DISTANCE = 20
 
 # Initialize Resend
-resend.api_key = "re_PTpC8h2Q_KAyxKq4DhdBJm7hRDh8rDgAM"
+resend.api_key = "re_HscFn33y_89LC49ZHxNpMjDRRqvgeynmY"
 
 
 class User(BaseModel):
