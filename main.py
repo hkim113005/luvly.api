@@ -5,16 +5,28 @@ import mysql.connector
 import resend
 import os
 import random
+import datetime
 
 from werkzeug.security import check_password_hash, generate_password_hash
 
 from geopy.distance import geodesic
 
+import firebase_admin
+from firebase_admin import credentials
+from firebase_admin import messaging
+
 
 app = FastAPI()
 
 
+server_key = 'luvly-9-firebase-adminsdk-anmuf-e5f094432b.json'
+
+cred = credentials.Certificate(server_key)
+firebase_admin.initialize_app(cred)
+
+
 DISTANCE = 20
+COOLDOWN_TIME = 5
 
 # Initialize Resend
 resend.api_key = "re_HscFn33y_89LC49ZHxNpMjDRRqvgeynmY"
@@ -51,6 +63,10 @@ class VerifyUser(BaseModel):
     email: str
     password: str
     verification_code: str
+
+class Token(BaseModel):
+    user_id: str = None
+    token: str
 
 
 def get_db():
@@ -131,11 +147,6 @@ async def register(user: User):
         cursor.close()
         db.close()
         return {"status": "403"}
-    
-    cursor.execute("SELECT COUNT(user_id) FROM users")
-    user_id = cursor.fetchone()[0]
-    if not user_id:
-        user_id = 0
 
     # Generate verification code
     verification_code = ''.join([str(random.randint(0, 9)) for _ in range(6)])
@@ -151,7 +162,7 @@ async def register(user: User):
 
     # Send verification email
     if send_verification_email(user.email, verification_code):
-        return {"status": "200", "user_id": str(user_id).zfill(8)}
+        return {"status": "200"}
     else:
         return {"status": "406"}  # Failed to send verification email
 
@@ -179,21 +190,26 @@ async def verify_email(verifyUser: VerifyUser):
         db.close()
         return {"status": "408"}  # Invalid verification code
 
+    cursor.execute("SELECT COUNT(user_id) FROM users")
+    user_id = cursor.fetchone()[0]
+    if not user_id:
+        user_id = 0
+
     # Update user as verified and update user_id
     cursor.execute(f"UPDATE verification SET is_verified = TRUE WHERE email = '{verifyUser.email}'")
     # Store user
     cursor.execute(f"""INSERT INTO users (user_id, email, password_hash) 
-                       VALUES(LPAD('{verifyUser.user_id}', 8, '0'), '{verifyUser.email}', '{generate_password_hash(verifyUser.password)}');""")
+                       VALUES(LPAD('{user_id}', 8, '0'), '{verifyUser.email}', '{generate_password_hash(verifyUser.password)}');""")
     
     db.commit()
     cursor.close()
     db.close()
 
-    return {"status": "200", "user_id": user[1]}
+    return {"status": "200", "user_id": user_id}
 
 
-@app.get("/get_matches/{user_id}", response_model=list[Match])
-async def get_matches(user_id: str):
+@app.get("/get_matches/{user_id}/{cur_datetime}", response_model=list[Match])
+async def get_matches(user_id: str, cur_datetime: str):
     db = get_db()
     cursor = db.cursor()
 
@@ -204,11 +220,18 @@ async def get_matches(user_id: str):
                    """)
     
     matches = cursor.fetchall()
+    valid_matches = []
+    for match in matches:
+        datetime_format = "%Y-%m-%d %H:%M:%S"
+        match_time = datetime.datetime.strptime(match[3], datetime_format)
+        cur_time = datetime.datetime.strptime(cur_datetime, datetime_format)
+        if ((cur_time - match_time).total_seconds() < COOLDOWN_TIME):
+            valid_matches.append(match)
 
     cursor.close()
     db.close()
     
-    return [{"send_id": match[0], "receive_id": match[1], "distance": match[2], "date_time": match[3]} for match in matches]
+    return [{"send_id": match[0], "receive_id": match[1], "distance": match[2], "date_time": match[3]} for match in valid_matches]
 
 
 @app.post("/update_luv", response_model=Response)
@@ -223,15 +246,12 @@ async def update_luv(user_luv: UserLuv):
         db.close()
         return {"status": "403"}
     
-    # Update users_luvs
-    print(f"""INSERT INTO users_luvs (user_id, luv_id, date_time) 
-                       VALUES('{user_luv.user_id}', '{luv[0]}', '{user_luv.date_time}');""")
-    
+    # Update users_luvs    
     cursor.execute(f"""INSERT INTO users_luvs (user_id, luv_id, date_time) 
                        VALUES('{user_luv.user_id}', '{luv[0]}', '{user_luv.date_time}');""")
     
     # Update users_matches
-    cursor.execute(f"DELETE FROM users_matches WHERE send_id = '{user_luv.user_id}'")
+    # DELETE cursor.execute(f"DELETE FROM users_matches WHERE send_id = '{user_luv.user_id}'")
 
     cursor.execute(f"""
                     SELECT user_id, latitude, longitude
@@ -256,10 +276,24 @@ async def update_luv(user_luv: UserLuv):
         distance = geodesic((send_latitude, send_longitude), (receive_latitude, receive_longitude)).meters
 
         if distance < DISTANCE:
-            cursor.execute(f"""INSERT INTO users_matches (send_id, receive_id, distance, date_time) 
-                           VALUES('{send_id}', '{receive_id}', {distance}, '{user_luv.date_time}') 
-                           ON DUPLICATE KEY UPDATE date_time = '{user_luv.date_time}'
-                           """)
+            cursor.execute(f"""
+                            SELECT * 
+                            FROM users_matches
+                            WHERE send_id = '{send_id}' AND receive_id = '{receive_id}'
+                            """)
+            most_recent_match = cursor.fetchone()
+            
+            cursor.execute(f"""
+                            INSERT INTO users_matches (send_id, receive_id, distance, date_time) 
+                            VALUES('{send_id}', '{receive_id}', {distance}, '{user_luv.date_time}') 
+                            ON DUPLICATE KEY UPDATE date_time = '{user_luv.date_time}'
+                            """)
+            
+            datetime_format = "%Y-%m-%d %H:%M:%S"
+            recent_datetime = datetime.datetime.strptime(most_recent_match[4], datetime_format)
+            new_datetime = datetime.datetime.strptime(user_luv.date_time, datetime_format)
+            if (new_datetime - recent_datetime).total_seconds() > COOLDOWN_TIME:
+                send_notification(receive_id)
 
     db.commit()
     cursor.close()
@@ -279,11 +313,11 @@ async def update_location(location: Location):
     # Deleting oldest location
     if count >= 30:
         cursor.execute(f"""
-                       DELETE FROM users_locations
-                       WHERE user_id = '{location.user_id}'
-                       ORDER BY date_time ASC
-                       LIMIT 1;
-                       """)
+                        DELETE FROM users_locations
+                        WHERE user_id = '{location.user_id}'
+                        ORDER BY date_time ASC
+                        LIMIT 1;
+                        """)
         
     # Update Location
     cursor.execute(f"""
@@ -305,7 +339,7 @@ async def update_location(location: Location):
     all_users = cursor.fetchall()
 
     # Delete existing matches for the current user 
-    cursor.execute(f"DELETE FROM users_matches WHERE receive_id = '{location.user_id}'")
+    # DELETE cursor.execute(f"DELETE FROM users_matches WHERE receive_id = '{location.user_id}'")
 
     for send_user in all_users:
         send_id, send_latitude, send_longitude = send_user
@@ -327,13 +361,28 @@ async def update_location(location: Location):
             match = cursor.fetchone()
             if match and match[2] == location.user_id:
                 cursor.execute(f"""
+                                SELECT * 
+                                FROM users_matches
+                                WHERE send_id = '{send_id}' AND receive_id = '{location.user_id}'
+                                """)
+                most_recent_match = cursor.fetchone()
+
+                cursor.execute(f"""
                                 INSERT INTO users_matches (send_id, receive_id, distance, date_time)
                                 VALUES ('{send_id}', '{location.user_id}', {distance}, '{location.date_time}')
                                 ON DUPLICATE KEY UPDATE date_time = '{location.date_time}'
                                 """)
                 
+                datetime_format = "%Y-%m-%d %H:%M:%S"
+                recent_datetime = datetime.datetime.strptime(most_recent_match[4], datetime_format)
+                new_datetime = datetime.datetime.strptime(location.date_time, datetime_format)
+                print((new_datetime - recent_datetime).total_seconds())
+                if (new_datetime - recent_datetime).total_seconds() > COOLDOWN_TIME:
+                    print("SENT TO " + location.user_id)
+                    send_notification(location.user_id)
+                
     # Delete matches where current user is sender
-    cursor.execute(f"DELETE FROM users_matches WHERE send_id = '{location.user_id}'")
+    # DELETE cursor.execute(f"DELETE FROM users_matches WHERE send_id = '{location.user_id}'")
 
     cursor.execute(f"""
                     SELECT *
@@ -360,13 +409,78 @@ async def update_location(location: Location):
             distance = geodesic((location.latitude, location.longitude), (receive_latitude, receive_longitude)).meters
 
             if distance < DISTANCE:
-                cursor.execute(f"""INSERT INTO users_matches (send_id, receive_id, distance, date_time) 
-                            VALUES('{location.user_id}', '{receive_id}', {distance}, '{location.date_time}')
-                            ON DUPLICATE KEY UPDATE date_time = '{location.date_time}'
-                            """)
+                cursor.execute(f"""
+                                SELECT * 
+                                FROM users_matches
+                                WHERE send_id = '{location.user_id}' AND receive_id = '{receive_id}'
+                                """)
+                most_recent_match = cursor.fetchone()
+
+                cursor.execute(f"""
+                                INSERT INTO users_matches (send_id, receive_id, distance, date_time) 
+                                VALUES('{location.user_id}', '{receive_id}', {distance}, '{location.date_time}')
+                                ON DUPLICATE KEY UPDATE date_time = '{location.date_time}'
+                                """)
+                
+                datetime_format = "%Y-%m-%d %H:%M:%S"
+                recent_datetime = datetime.datetime.strptime(most_recent_match[4], datetime_format)
+                new_datetime = datetime.datetime.strptime(location.date_time, datetime_format)
+                print((new_datetime - recent_datetime).total_seconds())
+                if (new_datetime - recent_datetime).total_seconds() > COOLDOWN_TIME:
+                    print("SENT TO " + receive_id)
+                    send_notification(receive_id)
 
     db.commit()
     cursor.close()
     db.close()
 
     return {"status": "200"}
+
+
+@app.post("/update_token", response_model=Response)
+async def update_fcm_token(token: Token):
+    db = get_db()
+    cursor = db.cursor()
+
+    cursor.execute(f"""INSERT INTO users_tokens (user_id, token)
+                   VALUES('{token.user_id}', '{token.token}')""")
+    
+    db.commit()
+    cursor.close()
+    db.close()
+
+    return {"status": "200"}
+
+
+def send_notification(user_id):
+    db = get_db()
+    cursor = db.cursor()
+
+    # This registration token comes from the client FCM SDKs.
+    # registration_token = 'dFDbUh5Ub0lXiMo2cJcrGZ:APA91bET5SrrUPt6HEWmhIuwB-dA6aU464h5QoDFf4IwedFDCDyAag6tAW0xbsa5pZmnJUSmbkO99gr_fBkE5rEB6c7ucmqV40skslOXoMTAzuOqCp5uhUU'
+    cursor.execute(f"SELECT token FROM users_tokens WHERE user_id = '{user_id}'")
+    registration_token = cursor.fetchone()[0]
+
+    # See documentation on defining a message payload.
+    message = messaging.Message(
+        notification=messaging.Notification(
+            title='Test',
+            body='Test Body'
+        ),
+        apns=messaging.APNSConfig(
+            payload=messaging.APNSPayload(
+                aps=messaging.Aps(
+                    sound="default"  # Plays the default notification sound on iOS
+                )
+            )
+        ),
+        token=registration_token,
+    )
+    # Send a message to the device corresponding to the provided
+    # registration token.
+    response = messaging.send(message)
+    # Response is a message ID string.
+    print('Successfully sent message:', response)
+
+
+# send_notification("00000003")
